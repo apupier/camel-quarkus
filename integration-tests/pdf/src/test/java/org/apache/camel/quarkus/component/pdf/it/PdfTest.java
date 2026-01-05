@@ -17,6 +17,7 @@
 package org.apache.camel.quarkus.component.pdf.it;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -26,7 +27,10 @@ import io.restassured.http.ContentType;
 import io.smallrye.common.os.OS;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
@@ -110,6 +114,42 @@ class PdfTest {
         String text = pdfTextStripper.getText(doc);
         assertEquals(2, doc.getNumberOfPages());
         assertTrue(text.contains("first content\nsecond content"));
+
+        doc.close();
+    }
+
+    @Test
+    public void mergeWithImages() throws IOException {
+        Path firstPdfPath = Files.createTempFile("firstPdf", ".pdf");
+        PDDocument firstDocument = new PDDocument();
+        firstDocument.addPage(new PDPage());
+        PDPage page = firstDocument.getPage(0);
+        InputStream imageStream = PdfTest.class.getResourceAsStream("/blackline.png");
+        PDImageXObject pdImage = PDImageXObject.createFromByteArray(firstDocument, imageStream.readAllBytes(),
+                "blackline png image");
+        PDPageContentStream contents = new PDPageContentStream(firstDocument, page);
+        contents.drawImage(pdImage, 70, 250);
+        contents.close();
+        firstDocument.save(firstPdfPath.toString());
+        firstDocument.close();
+
+        byte[] bytesSecondPDF = RestAssured.given().contentType(ContentType.TEXT)
+                .body("second content").post("/pdf/createFromText").then().statusCode(201)
+                .extract().asByteArray();
+        Path secondPdfPath = Files.createTempFile("secondPdf", ".pdf");
+        Files.write(secondPdfPath, bytesSecondPDF);
+
+        byte[] bytesMergedPDF = RestAssured.given()
+                .queryParam("firstPdf", firstPdfPath.toString())
+                .queryParam("secondPdf", secondPdfPath.toString())
+                .post("/pdf/merge").then().statusCode(201)
+                .extract().asByteArray();
+
+        PDDocument doc = Loader.loadPDF(bytesMergedPDF);
+        PDFTextStripper pdfTextStripper = new PDFTextStripper();
+        String text = pdfTextStripper.getText(doc);
+        assertEquals(2, doc.getNumberOfPages());
+        assertTrue(text.contains("second content"));
 
         doc.close();
     }
