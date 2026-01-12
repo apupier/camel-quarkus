@@ -7387,6 +7387,16 @@
         <version>1.2.11</version>
       </dependency>
       <dependency>
+        <groupId>io.quarkiverse.batik</groupId>
+        <artifactId>quarkus-batik</artifactId>
+        <version>1.0.0</version>
+      </dependency>
+      <dependency>
+        <groupId>io.quarkiverse.batik</groupId>
+        <artifactId>quarkus-batik-deployment</artifactId>
+        <version>1.0.0</version>
+      </dependency>
+      <dependency>
         <groupId>io.quarkiverse.fory</groupId>
         <artifactId>quarkus-fory</artifactId>
         <version>0.5.0</version>

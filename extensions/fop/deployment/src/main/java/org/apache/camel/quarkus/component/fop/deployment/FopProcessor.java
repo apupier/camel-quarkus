@@ -16,6 +16,7 @@
  */
 package org.apache.camel.quarkus.component.fop.deployment;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -28,18 +29,45 @@ import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
 import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.deployment.builditem.IndexDependencyBuildItem;
 import io.quarkus.deployment.builditem.NativeImageFeatureBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.NativeImageProxyDefinitionBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.NativeImageResourceBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedClassBuildItem;
+import org.apache.batik.ext.awt.image.spi.ImageTagRegistry;
+import org.apache.batik.transcoder.wmf.tosvg.WMFPainter;
 import org.apache.camel.quarkus.component.fop.FopRuntimeProxyFeature;
+import org.apache.fop.ResourceEventProducer;
+import org.apache.fop.fo.ElementMappingRegistry;
 import org.apache.fop.fo.expr.PropertyException;
 import org.apache.fop.fonts.Base14Font;
+import org.apache.fop.image.loader.batik.ImageConverterG2D2SVG;
+import org.apache.fop.image.loader.batik.ImageConverterSVG2G2D;
+import org.apache.fop.image.loader.batik.ImageConverterWMF2G2D;
+import org.apache.fop.image.loader.batik.ImageLoaderFactorySVG;
 import org.apache.fop.pdf.PDFSignature;
+import org.apache.fop.render.ImageHandlerRegistry;
 import org.apache.fop.render.RendererEventProducer;
+import org.apache.fop.render.RendererFactory;
+import org.apache.fop.render.XMLHandlerRegistry;
+import org.apache.fop.render.bitmap.PNGRendererMaker;
 import org.apache.fop.render.pdf.PDFDocumentHandlerMaker;
+import org.apache.fop.render.pdf.PDFImageHandlerRawPNG;
 import org.apache.fop.render.pdf.extensions.PDFExtensionHandlerFactory;
+import org.apache.fop.render.ps.PSImageHandlerRawPNG;
+import org.apache.fop.render.rtf.RTFFOEventHandlerMaker;
+import org.apache.fop.render.rtf.rtflib.rtfdoc.RtfList;
 import org.apache.fop.util.ColorUtil;
+import org.apache.fop.util.ContentHandlerFactoryRegistry;
+import org.apache.fop.utils.text.AdvancedMessageFormat;
+import org.apache.xmlgraphics.image.loader.ImageException;
+import org.apache.xmlgraphics.image.loader.impl.ImageLoaderFactoryPNG;
+import org.apache.xmlgraphics.image.loader.impl.ImageLoaderFactoryRaw;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderRawPNG;
+import org.apache.xmlgraphics.image.loader.impl.imageio.ImageLoaderFactoryImageIO;
+import org.apache.xmlgraphics.image.loader.impl.imageio.ImageLoaderImageIO;
+import org.apache.xmlgraphics.image.loader.impl.imageio.PreloaderImageIO;
 import org.apache.xmlgraphics.image.loader.spi.ImageImplRegistry;
+import org.apache.xmlgraphics.image.writer.ImageWriterRegistry;
 import org.apache.xmlgraphics.java2d.color.ICCColorSpaceWithIntent;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
@@ -58,6 +86,11 @@ class FopProcessor {
     }
 
     @BuildStep
+    NativeImageProxyDefinitionBuildItem registerDefinitionBuildTimeProxies() {
+        return new NativeImageProxyDefinitionBuildItem(ResourceEventProducer.class.getName());
+    }
+
+    @BuildStep
     ReflectiveClassBuildItem registerForReflection(CombinedIndexBuildItem combinedIndex) {
         IndexView index = combinedIndex.getIndex();
 
@@ -71,9 +104,34 @@ class FopProcessor {
         dtos.add(PDFDocumentHandlerMaker.class.getName());
         dtos.add(RendererEventProducer.class.getName());
         dtos.add(IOException.class.getName());
+        dtos.add(FileNotFoundException.class.getName());
+        dtos.add(ImageException.class.getName());
         dtos.add(Integer.class.getName());
         dtos.add(QName.class.getName());
         dtos.add(PropertyException.class.getName());
+
+        dtos.add(PDFImageHandlerRawPNG.class.getName());
+        dtos.add(ImageLoaderImageIO.class.getName());
+
+        // Service ImagePreloader
+        dtos.add(PreloaderImageIO.class.getName());
+        dtos.add(PreloaderRawPNG.class.getName());
+
+        // service FoEventHandler
+        dtos.add(RTFFOEventHandlerMaker.class.getName());
+
+        // Service ImageLoaderFactory fop
+        dtos.add(ImageLoaderFactoryPNG.class.getName());
+        dtos.add(ImageLoaderFactoryImageIO.class.getName());
+        dtos.add(ImageLoaderFactorySVG.class.getName());
+        dtos.add(ImageLoaderFactoryRaw.class.getName());
+
+        // Service ImageConverter
+        dtos.add(ImageConverterSVG2G2D.class.getName());
+        dtos.add(ImageConverterG2D2SVG.class.getName());
+        dtos.add(ImageConverterWMF2G2D.class.getName());
+        dtos.add(PNGRendererMaker.class.getName());
+        dtos.add(PSImageHandlerRawPNG.class.getName());
 
         return ReflectiveClassBuildItem.builder(dtos.toArray(new String[0])).build();
     }
@@ -84,10 +142,16 @@ class FopProcessor {
     }
 
     @BuildStep
-    NativeImageResourceBuildItem initResources() {
-        return new NativeImageResourceBuildItem(
+    NativeImageResourceBuildItem initResources(/*Collection<ResolvedDependency> dependencies*/) {
+         return new NativeImageResourceBuildItem(
                 "META-INF/services/org.apache.fop.fo.ElementMapping",
+                "META-INF/services/org.apache.fop.fo.FOEventHandler",
+                "META-INF/services/org.apache.fop.ImageHandler",
                 "META-INF/services/org.apache.fop.render.intermediate.IFDocumentHandler",
+                "META-INF/services/org.apache.fop.render.Renderer",
+                "META-INF/services/org.apache.xmlgraphics.image.loader.spi.ImageConverter",
+                "META-INF/services/org.apache.xmlgraphics.image.loader.spi.ImageloaderFactory",
+                "META-INF/services/org.apache.xmlgraphics.image.loader.spi.ImagePreloader",
                 "org/apache/fop/svg/event-model.xml",
                 "org/apache/fop/area/event-model.xml",
                 "org/apache/fop/afp/event-model.xml",
@@ -119,8 +183,25 @@ class FopProcessor {
                 .forEach(runtimeInitializedClass::produce);
 
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageImplRegistry.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageHandlerRegistry.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageTagRegistry.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageWriterRegistry.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ColorUtil.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ICCColorSpaceWithIntent.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(PDFSignature.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(RendererFactory.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(XMLHandlerRegistry.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ContentHandlerFactoryRegistry.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(AdvancedMessageFormat.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ElementMappingRegistry.class.getName()));
+        runtimeInitializedClass
+                .produce(new RuntimeInitializedClassBuildItem("org.apache.xmlgraphics.image.codec.png.PNGImage"));
+
+        // Random
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(RtfList.class.getName()));
+
+        // batik
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(WMFPainter.class.getName()));
+
     }
 }

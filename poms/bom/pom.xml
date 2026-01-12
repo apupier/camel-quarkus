@@ -7536,6 +7536,16 @@
                 <version>${reactor-netty.version}</version>
             </dependency>
             <dependency>
+                <groupId>io.quarkiverse.batik</groupId>
+                <artifactId>quarkus-batik</artifactId>
+                <version>${quarkiverse-batik.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.quarkiverse.batik</groupId>
+                <artifactId>quarkus-batik-deployment</artifactId>
+                <version>${quarkiverse-batik.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>io.quarkiverse.fory</groupId>
                 <artifactId>quarkus-fory</artifactId>
                 <version>${quarkiverse-fory.version}</version>
