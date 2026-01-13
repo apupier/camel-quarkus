@@ -33,7 +33,10 @@ import io.quarkus.deployment.builditem.nativeimage.NativeImageProxyDefinitionBui
 import io.quarkus.deployment.builditem.nativeimage.NativeImageResourceBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedClassBuildItem;
+import org.apache.batik.bridge.RhinoInterpreterFactory;
+import org.apache.batik.bridge.SVG12RhinoInterpreter;
 import org.apache.batik.ext.awt.image.spi.ImageTagRegistry;
+import org.apache.batik.extension.svg.GlyphIterator;
 import org.apache.batik.transcoder.wmf.tosvg.WMFPainter;
 import org.apache.camel.quarkus.component.fop.FopRuntimeProxyFeature;
 import org.apache.fop.ResourceEventProducer;
@@ -49,26 +52,43 @@ import org.apache.fop.render.ImageHandlerRegistry;
 import org.apache.fop.render.RendererEventProducer;
 import org.apache.fop.render.RendererFactory;
 import org.apache.fop.render.XMLHandlerRegistry;
+import org.apache.fop.render.bitmap.BitmapRendererOption;
 import org.apache.fop.render.bitmap.PNGRendererMaker;
+import org.apache.fop.render.pcl.PCLPageDefinition;
 import org.apache.fop.render.pdf.PDFDocumentHandlerMaker;
 import org.apache.fop.render.pdf.PDFImageHandlerRawPNG;
 import org.apache.fop.render.pdf.extensions.PDFExtensionHandlerFactory;
 import org.apache.fop.render.ps.PSImageHandlerRawPNG;
+import org.apache.fop.render.ps.PSImageHandlerSVG;
 import org.apache.fop.render.rtf.RTFFOEventHandlerMaker;
 import org.apache.fop.render.rtf.rtflib.rtfdoc.RtfList;
 import org.apache.fop.util.ColorUtil;
 import org.apache.fop.util.ContentHandlerFactoryRegistry;
+import org.apache.fop.util.bitmap.JAIMonochromeBitmapConverter;
 import org.apache.fop.utils.text.AdvancedMessageFormat;
 import org.apache.xmlgraphics.image.loader.ImageException;
+import org.apache.xmlgraphics.image.loader.impl.ImageConverterBitmap2G2D;
+import org.apache.xmlgraphics.image.loader.impl.ImageConverterBuffered2Rendered;
+import org.apache.xmlgraphics.image.loader.impl.ImageConverterG2D2Bitmap;
+import org.apache.xmlgraphics.image.loader.impl.ImageConverterRendered2PNG;
 import org.apache.xmlgraphics.image.loader.impl.ImageLoaderFactoryPNG;
 import org.apache.xmlgraphics.image.loader.impl.ImageLoaderFactoryRaw;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderBMP;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderEMF;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderEPS;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderGIF;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderJPEG;
 import org.apache.xmlgraphics.image.loader.impl.PreloaderRawPNG;
+import org.apache.xmlgraphics.image.loader.impl.PreloaderTIFF;
 import org.apache.xmlgraphics.image.loader.impl.imageio.ImageLoaderFactoryImageIO;
 import org.apache.xmlgraphics.image.loader.impl.imageio.ImageLoaderImageIO;
 import org.apache.xmlgraphics.image.loader.impl.imageio.PreloaderImageIO;
 import org.apache.xmlgraphics.image.loader.spi.ImageImplRegistry;
 import org.apache.xmlgraphics.image.writer.ImageWriterRegistry;
 import org.apache.xmlgraphics.java2d.color.ICCColorSpaceWithIntent;
+import org.apache.xmlgraphics.ps.ImageEncodingHelper;
+import org.apache.xmlgraphics.ps.PSState;
+import org.apache.xmlgraphics.util.uri.CommonURIResolver;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
 
@@ -111,9 +131,16 @@ class FopProcessor {
         dtos.add(PropertyException.class.getName());
 
         dtos.add(PDFImageHandlerRawPNG.class.getName());
+        // TWhen launching in JVM mode, it is the Pipeline loader used, where the java stack differs with native
         dtos.add(ImageLoaderImageIO.class.getName());
 
-        // Service ImagePreloader
+        // Service ImagePreloader xmlgraphics-common
+        dtos.add(PreloaderTIFF.class.getName());
+        dtos.add(PreloaderGIF.class.getName());
+        dtos.add(PreloaderJPEG.class.getName());
+        dtos.add(PreloaderBMP.class.getName());
+        dtos.add(PreloaderEMF.class.getName());
+        dtos.add(PreloaderEPS.class.getName());
         dtos.add(PreloaderImageIO.class.getName());
         dtos.add(PreloaderRawPNG.class.getName());
 
@@ -126,12 +153,21 @@ class FopProcessor {
         dtos.add(ImageLoaderFactorySVG.class.getName());
         dtos.add(ImageLoaderFactoryRaw.class.getName());
 
-        // Service ImageConverter
+        // Service ImageConverter fop
         dtos.add(ImageConverterSVG2G2D.class.getName());
         dtos.add(ImageConverterG2D2SVG.class.getName());
         dtos.add(ImageConverterWMF2G2D.class.getName());
         dtos.add(PNGRendererMaker.class.getName());
         dtos.add(PSImageHandlerRawPNG.class.getName());
+
+        // Service ImageConverter xml graphics
+        dtos.add(ImageConverterBuffered2Rendered.class.getName());
+        dtos.add(ImageConverterG2D2Bitmap.class.getName());
+        dtos.add(ImageConverterBitmap2G2D.class.getName());
+        dtos.add(ImageConverterRendered2PNG.class.getName());
+
+        // these ones to try to avoid CNFE on org.mozilla.javascript.ContextAction at build time
+        dtos.add("org.mozilla.javascript.ContextAction");
 
         return ReflectiveClassBuildItem.builder(dtos.toArray(new String[0])).build();
     }
@@ -139,11 +175,13 @@ class FopProcessor {
     @BuildStep
     void addDependencies(BuildProducer<IndexDependencyBuildItem> indexDependency) {
         indexDependency.produce(new IndexDependencyBuildItem("org.apache.xmlgraphics", "fop-core"));
+        // Some SPI declared there, do we need to index it explictely?
+        //indexDependency.produce(new IndexDependencyBuildItem("org.apache.xmlgraphics", "xmlgraphics-common"));
     }
 
     @BuildStep
     NativeImageResourceBuildItem initResources(/*Collection<ResolvedDependency> dependencies*/) {
-         return new NativeImageResourceBuildItem(
+        return new NativeImageResourceBuildItem(
                 "META-INF/services/org.apache.fop.fo.ElementMapping",
                 "META-INF/services/org.apache.fop.fo.FOEventHandler",
                 "META-INF/services/org.apache.fop.ImageHandler",
@@ -185,7 +223,6 @@ class FopProcessor {
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageImplRegistry.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageHandlerRegistry.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageTagRegistry.class.getName()));
-        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageWriterRegistry.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ColorUtil.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ICCColorSpaceWithIntent.class.getName()));
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(PDFSignature.class.getName()));
@@ -202,6 +239,25 @@ class FopProcessor {
 
         // batik
         runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(WMFPainter.class.getName()));
+
+        // xmlgraphics-commons
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(CommonURIResolver.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageWriterRegistry.class.getName()));
+
+        // when activating auto-registration of serviceloader (quarkus.native.auto-service-loader-registration)
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(JAIMonochromeBitmapConverter.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem("org.apache.fop.svg.font.ComplexGlyphVector"));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(GlyphIterator.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(ImageEncodingHelper.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(PCLPageDefinition.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(PSImageHandlerSVG.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(BitmapRendererOption.class.getName()));
+        runtimeInitializedClass
+                .produce(new RuntimeInitializedClassBuildItem("org.apache.fop.render.bitmap.BitmapRendererConfig$1"));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(PSState.class.getName()));
+        // these ones to try to avoid CNFE on org.mozilla.javascript.ContextAction at build time
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(SVG12RhinoInterpreter.class.getName()));
+        runtimeInitializedClass.produce(new RuntimeInitializedClassBuildItem(RhinoInterpreterFactory.class.getName()));
 
     }
 }
